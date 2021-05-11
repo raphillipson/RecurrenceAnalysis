@@ -419,7 +419,7 @@ class Recurrence_Plot:
         else:
             print("Line type not specified (must be line_type='diagonal' or 'vertical')")
 
-        return num_lines, bins, line_lengths
+        return num_lines, bins
 
 
 
@@ -612,7 +612,7 @@ class Recurrence_Plot:
         N = len(rp_matrix)
         RR = np.nansum(rp_matrix)/(N*N)
 
-        # TREND -- the paling of the RP towards its edges
+        # TO DO: TREND -- the paling of the RP towards its edges
 
         # Diagonal line based quantities
         DET = np.nansum(diagReference)/sumDL
@@ -857,7 +857,7 @@ class Time_Series:
     #  Internal methods
     #
     
-    def __init__(self, time_series, times, errors=None, multidim=False, normed=True, silence=False,
+    def __init__(self, time_series, times, errors=None, binTimes=None, multidim=False, normed=True, silence=False,
                  **kwds):
 
         """
@@ -877,11 +877,13 @@ class Time_Series:
         Inputs:
             :arg time_series:      The time series to be analyzed, scalar or multi-dimensional
             :arg times:            The times for the input time_series, must be scalar
+            :arg errors:           The errors for the input time_series
+            :arg binTimes:         (optional) input array of exposure times for each observation centered on times
             :arg bool multidim:    Indicate multidimensional input (True); indicate scalar input (False) and use Time Delay method
             :arg bool normed:      Decide whether to normalize the time series to
                                    zero mean and unit standard deviation.
         Keywords:
-            :arg errors:           The errors for the input time_series
+            
             :arg int dimension:    The embedding dimension to use with Time Delay method
             :arg int delay:        The embedding time delay to use with Time Delay method
 
@@ -895,8 +897,11 @@ class Time_Series:
         #  Store time series
         self.time_series = time_series.copy().astype(np.float)
 
-        #  Reshape time series
-        #self.time_series.shape = (self.time_series.shape[0], -1)
+        #  Get the errors and store
+        if errors is not None:
+            if normed:
+                errors = errors / np.std(time_series)
+            self.errors = errors.copy().astype(np.float)
         
         # Time series times
         self.times = times.copy().astype(np.float)
@@ -909,9 +914,9 @@ class Time_Series:
         self.dimension = kwds.get("dimension")
         self.delay = kwds.get("delay")
         
-        # Get errors on the time series measurements from **kwds
-        self.errors = errors
-
+        # Exposure times for each observation in the time series
+        self.bin_times = binTimes
+        
         #  Embed the time series if necessary, or use multidimensional input as embedded array
         if multidim:
             self.embedded_ts = self.time_series
@@ -930,16 +935,23 @@ class Time_Series:
         Return the current time series
         """
         return self.time_series
+
+    def times(self):
+        """
+        Return the current time series times
+        """
+        return self.times
     
     
     @staticmethod
-    def normalize(x):
+    def normalize(x, err=None):
         '''
         Normalize a time series to have zero mean and unit standard deviation.
         Inputs:
             x : input time series (numpy array or list)
+            err : input errors on time series (numpy array or list)
         Outputs:
-            z : normalized time series
+            z : normalized time series or errors
         '''
         if type(x) is list:
             x = np.array(x)
@@ -947,10 +959,13 @@ class Time_Series:
             print('input time series must by a numpy array or list. exiting.')
             return 
 
-        # normalize time series 
-        z = (x - x.mean()) / x.std()
-
-        return z
+        # normalize time series (or errors)
+        if err is not None:
+            zerr = err / x.std()
+            return zerr
+        else:
+            z = (x - x.mean()) / x.std()
+            return z
     
     @staticmethod
     def embed(x, dimension=1, delay=1):
@@ -986,15 +1001,22 @@ class Time_Series:
         """
         inputData = self.time_series
         inputErr = self.errors
+        inputTimes = self.times
+        inputBinTimes = self.bin_times
         
         # Get mean and standard deviation of the data
         mean = np.nanmean(inputData)
         stdDev = np.nanstd(inputData)
+        
+        if not silence:
+            print('mean flux:', mean)
+            print('stdDev flux:', stdDev)
+        
         if inputErr is not None:
             stdDevErr = np.nanstd(inputErr)
-
-        print('mean:', mean)
-        print('stdDev:', stdDev)
+            if not silence: 
+                print('mean error:', np.nanmean(inputErr))
+                print('stdDev of error:', stdDevErr)
 
         outliers = []
 
@@ -1009,8 +1031,11 @@ class Time_Series:
             newStdDev = np.nanstd(inputData[goodIndices])
             newStdDevErr = np.nanstd(inputErr[goodIndices])
 
-            print('new mean:', newMean)
-            print('new stdDev:', newStdDev)
+            if not silence:
+                print('new mean flux:', newMean)
+                print('new stdDev flux:', newStdDev)
+                print('new mean error:', np.nanmean(inputErr[goodIndices]))
+                print('new stdDev of error:', newStdDevErr)
 
             hiRate = numStdDevs*newStdDev + newMean
             lowRate = newMean - numStdDevs*newStdDev
@@ -1029,10 +1054,29 @@ class Time_Series:
                 if inputData[i] > hiRate or inputData[i] < lowRate:
                     outliers.append(i)
                     
+        ts_no_outliers = []
+        for i in range(0, len(inputData)):
+            if i in outliers:
+                ts_no_outliers.append(np.nan)
+            else: 
+                ts_no_outliers.append(inputData[i])
+        ts_no_outliers = np.array(ts_no_outliers)
+
+        # Now exclude NaN entries entirely
+        rate = ts_no_outliers[~np.isnan(ts_no_outliers)]
+        time = inputTimes[~np.isnan(ts_no_outliers)]
+        bin_times = inputBinTimes[~np.isnan(ts_no_outliers)]
+        error = inputErr[~np.isnan(ts_no_outliers)]
+
+        self.time_series = rate
+        self.times = time
+        self.bin_times = bin_times
+        self.errors = error
+        
         return outliers
     
     
-    def rebinLC(self, dt, multidim=False, multidimComp=0, binTimes=None,
+    def rebinLC(self, dt, multidim=False, multidimComp=0,
             tstart=None, tstop=None, minbin=1,
             user_bin=False, user_bin_lo=None, user_bin_hi=None,
             weight=False, delgap=0, interpolation_width=50, frac_time_threshold=0.2):
@@ -1079,6 +1123,8 @@ class Time_Series:
         else:
             rate = self.time_series
         err = self.errors
+        
+        binTimes = self.bin_times
         
         ######################################
         # Settings
@@ -1270,11 +1316,11 @@ class Time_Series:
         #     new_errors = [y for x in temp_errs for y in x]
         
 
-        #self.times = new_t
-        #self.time_series = new_rates
+        self.times = new_t
+        self.time_series = new_rates
+        self.errors = new_errors
 
-
-        return new_rates, new_t, new_errors, new_bintimes, np.array(empty_bin_num)
+        return new_bintimes, np.array(empty_bin_num)
 
 
     def subSampleLC(self, sample_rate=1):
@@ -1516,7 +1562,7 @@ class Time_Series:
             multual_info : (float) mutual information
         """
         
-        ts = np.atleast_1d(x)
+        ts = np.atleast_1d(self.time_series)
         if len(ts.shape) != 1:
             raise ValueError("invalid dimensions for 1D autocorrelation function")
         n = Time_Series.next_pow_two(len(ts))
